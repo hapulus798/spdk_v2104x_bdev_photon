@@ -52,6 +52,7 @@ DIRS-$(CONFIG_PMDK) += pmem
 endif
 
 DIRS-$(CONFIG_RBD) += rbd
+DIRS-$(CONFIG_PHOTON) += photon
 
 .PHONY: all clean $(DIRS-y)
 

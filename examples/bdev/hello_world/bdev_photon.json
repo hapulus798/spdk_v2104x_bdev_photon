@@ -1,0 +1,15 @@
+{
+  "subsystems": [
+    {
+      "subsystem": "bdev",
+      "config": [
+        {
+          "method": "bdev_photon_create",
+          "params": {
+            "num_blocks": 1024
+          }
+        }
+      ]
+    }
+  ]
+}

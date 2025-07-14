@@ -117,6 +117,10 @@ CONFIG_FC_PATH=
 # Requires librbd development libraries
 CONFIG_RBD=n
 
+# Build Photon support in bdev modules
+# Requires libphoton.so
+CONFIG_PHOTON=y
+
 # Build vhost library.
 CONFIG_VHOST=y
 

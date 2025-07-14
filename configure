@@ -295,6 +295,12 @@ for i in "$@"; do
 		--without-rbd)
 			CONFIG[RBD]=n
 			;;
+		--with-photon)
+			CONFIG[PHOTON]=y
+			;;
+		--without-photon)
+			CONFIG[PHOTON]=n
+			;;
 		--with-rdma=*)
 			CONFIG[RDMA]=y
 			CONFIG[RDMA_PROV]=${i#*=}
@@ -714,6 +720,16 @@ if [[ "${CONFIG[RBD]}" = "y" ]]; then
 		exit 1
 	fi
 fi
+
+# if [[ "${CONFIG[PHOTON]}" = "y" ]]; then
+# 	echo "${BUILD_CMD[@]}"
+# 	if ! echo -e '#include <photon/rpc/rpc.h>\nint main(void) { return 0; }\n' \
+# 		| "${BUILD_CMD[@]}" -lphoton - 2> /dev/null; then
+# 		echo "--with-photon requires libphoton."
+# 		echo "Please install then re-run this script."
+# 		exit 1
+# 	fi
+# fi
 
 if [[ "${CONFIG[ISCSI_INITIATOR]}" = "y" ]]; then
 	# Fedora installs libiscsi to /usr/lib64/iscsi for some reason.

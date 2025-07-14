@@ -40,7 +40,9 @@
 #include "spdk/string.h"
 #include "spdk/bdev_zone.h"
 
-static char *g_bdev_name = "Malloc0";
+// static char *g_bdev_name = "Malloc0";
+static char *g_bdev_name = "Photon0";
+
 
 /*
  * We'll use this struct to gather housekeeping hello_context to pass between

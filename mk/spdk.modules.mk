@@ -96,6 +96,11 @@ BLOCKDEV_MODULES_LIST += bdev_rbd
 BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
 endif
 
+ifeq ($(CONFIG_PHOTON), y)
+BLOCKDEV_MODULES_LIST += bdev_photon
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lstdc++ -lphoton
+endif
+
 ifeq ($(CONFIG_PMDK),y)
 BLOCKDEV_MODULES_LIST += bdev_pmem
 BLOCKDEV_MODULES_PRIVATE_LIBS += -lpmemblk -lpmem
