@@ -1,6 +1,7 @@
 #include "bdev_photon.h"
 
 #include "spdk/log.h"
+#include "spdk/string.h"
 
 #include <photon/photon.h>
 #include <photon/net/socket.h>
@@ -21,7 +22,8 @@ struct InitDevice: public Operation {
     struct Request : public photon::rpc::Message {
         photon::rpc::string trid;
         uint32_t nsid;
-        PROCESS_FIELDS(trid, nsid);
+        uint64_t num_blocks;
+        PROCESS_FIELDS(trid, nsid, num_blocks);
     };
 
     struct Response : public photon::rpc::Message {
@@ -81,14 +83,17 @@ public:
         SPDK_NOTICELOG("RPCClient destruct done\n");
     }
 
-    int do_rpc_init_device() {
-        SPDK_NOTICELOG("do_rpc_init_device\n");
+    int do_rpc_init_device(uint64_t num_blocks, uint32_t* block_size) {
+        SPDK_NOTICELOG("do_rpc_init_device, num_blocks=%lu\n", num_blocks);
         InitDevice::Request req;
         req.trid = "trtype:pcie traddr:0000:86:00.0";
         req.nsid = 1;
+        req.num_blocks = num_blocks;
 
         InitDevice::Response resp;
         resp.rc = -1;
+        resp.num_sectors = 0;
+        resp.sector_size = 0;
 
         auto stub = stub_pool_->get_stub(ep_, false);
         assert(stub != nullptr);
@@ -96,6 +101,8 @@ public:
 
         int rc = stub->call<InitDevice>(req, resp);
         if (rc < 0) return rc;
+
+        *block_size = resp.sector_size;
         return resp.rc;
     }
 
@@ -194,14 +201,14 @@ public:
         SPDK_NOTICELOG("Client destruct done\n");
     }
 
-    int init_device() {
+    int init_device(uint64_t num_blocks, uint32_t* block_size) {
         SPDK_NOTICELOG("init_device\n");
-        wp_->call<photon::StdContext>([]{
+        wp_->call<photon::StdContext>([=]{
             SPDK_NOTICELOG("init_device, get into wp call, before assert check\n");
             assert(rpc_client_ != NULL);
             SPDK_NOTICELOG("init_device, get into wp call, after assert check\n");
-            rpc_client_->do_rpc_init_device();
-            SPDK_NOTICELOG("init_device, rpc done\n");
+            rpc_client_->do_rpc_init_device(num_blocks, block_size);
+            SPDK_NOTICELOG("init_device, rpc done, block_size=%u\n", *block_size);
         });
         return 0;
     }
@@ -245,6 +252,7 @@ private:
 };
 thread_local std::unique_ptr<RPCClient> Client::rpc_client_;
 
+static int bdev_photon_count = 0;
 
 struct photon_bdev {
     struct spdk_bdev bdev;
@@ -492,7 +500,7 @@ static void* create_rpc_client(void* arg) {
     return nullptr;
 }
 
-extern "C" int bdev_photon_create(struct spdk_bdev **bdev) {
+extern "C" int bdev_photon_create(struct spdk_bdev **bdev, uint64_t num_blocks) {
     SPDK_INFOLOG(bdev_photon, "bdev_photon_create\n");
 
     struct photon_bdev* pt_bdev = (struct photon_bdev* )calloc(1, sizeof(struct photon_bdev));
@@ -503,17 +511,25 @@ extern "C" int bdev_photon_create(struct spdk_bdev **bdev) {
 
     spdk_call_unaffinitized(create_rpc_client, pt_bdev);
     assert(pt_bdev->client != NULL);
-    pt_bdev->client->init_device();
 
-    pt_bdev->bdev.name = strdup("Photon0");
+    uint32_t block_size = 0;
+    pt_bdev->client->init_device(num_blocks, &block_size);
+    if (block_size == 0) {
+        SPDK_ERRLOG("bdev_photon_create: init_device failed\n");
+        return -1;
+    }
+
+    pt_bdev->bdev.name = spdk_sprintf_alloc("Photon%d", bdev_photon_count);
     pt_bdev->bdev.product_name = strdup("Photon implemented Disk");
     pt_bdev->bdev.write_cache = 0;
     pt_bdev->bdev.blocklen = 512;
-    pt_bdev->bdev.blockcnt = 1024;
+    pt_bdev->bdev.blockcnt = num_blocks;
     pt_bdev->bdev.fn_table = &bdev_photon_fn_table;
     pt_bdev->bdev.module = &photon_if;
     pt_bdev->bdev.ctxt = pt_bdev;
     spdk_uuid_generate(&pt_bdev->bdev.uuid);
+
+    bdev_photon_count++;
 
     spdk_io_device_register(pt_bdev, disk_io_channel_create_cb, disk_io_channel_destroy_cb, sizeof(struct disk_io_channel_context), "PhotonDisk");
 

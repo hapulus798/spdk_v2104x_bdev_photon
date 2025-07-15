@@ -1,0 +1,1328 @@
+From 12f37c41b70327639d91c9204ea84bd5ab926f8c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=A9=A7=E7=91=84?= <hongjingxuan.hjx@alibaba-inc.com>
+Date: Mon, 14 Jul 2025 12:03:45 +0800
+Subject: [PATCH 1/3] first version can run, do rpc with wp->call, some wrong
+ when delete wp
+
+---
+ CONFIG                                     |   4 +
+ configure                                  |  16 +
+ examples/bdev/hello_world/bdev_photon.json |  15 +
+ examples/bdev/hello_world/hello_bdev.c     |   4 +-
+ include/spdk/log.h                         |   2 +-
+ mk/spdk.lib_deps.mk                        |   1 +
+ mk/spdk.modules.mk                         |   5 +
+ module/bdev/Makefile                       |   1 +
+ module/bdev/photon/Makefile                |  13 +
+ module/bdev/photon/bdev_photon.cpp         | 466 +++++++++++++++++++++
+ module/bdev/photon/bdev_photon.h           |  21 +
+ module/bdev/photon/bdev_photon_rpc.c       |  83 ++++
+ rpc_server.cpp                             |  91 ++++
+ run.sh                                     |   7 +
+ run2.sh                                    |   9 +
+ scripts/rpc.py                             |  14 +
+ scripts/rpc/bdev.py                        |  10 +
+ 17 files changed, 760 insertions(+), 2 deletions(-)
+ create mode 100644 examples/bdev/hello_world/bdev_photon.json
+ create mode 100644 module/bdev/photon/Makefile
+ create mode 100644 module/bdev/photon/bdev_photon.cpp
+ create mode 100644 module/bdev/photon/bdev_photon.h
+ create mode 100644 module/bdev/photon/bdev_photon_rpc.c
+ create mode 100644 rpc_server.cpp
+ create mode 100644 run.sh
+ create mode 100644 run2.sh
+
+diff --git a/CONFIG b/CONFIG
+index 8c49c7d2b..c09b99aab 100644
+--- a/CONFIG
++++ b/CONFIG
+@@ -117,6 +117,10 @@ CONFIG_FC_PATH=
+ # Requires librbd development libraries
+ CONFIG_RBD=n
+ 
++# Build Photon support in bdev modules
++# Requires libphoton.so
++CONFIG_PHOTON=y
++
+ # Build vhost library.
+ CONFIG_VHOST=y
+ 
+diff --git a/configure b/configure
+index 3a785ce94..3d164eea6 100755
+--- a/configure
++++ b/configure
+@@ -295,6 +295,12 @@ for i in "$@"; do
+ 		--without-rbd)
+ 			CONFIG[RBD]=n
+ 			;;
++		--with-photon)
++			CONFIG[PHOTON]=y
++			;;
++		--without-photon)
++			CONFIG[PHOTON]=n
++			;;
+ 		--with-rdma=*)
+ 			CONFIG[RDMA]=y
+ 			CONFIG[RDMA_PROV]=${i#*=}
+@@ -715,6 +721,16 @@ if [[ "${CONFIG[RBD]}" = "y" ]]; then
+ 	fi
+ fi
+ 
++# if [[ "${CONFIG[PHOTON]}" = "y" ]]; then
++# 	echo "${BUILD_CMD[@]}"
++# 	if ! echo -e '#include <photon/rpc/rpc.h>\nint main(void) { return 0; }\n' \
++# 		| "${BUILD_CMD[@]}" -lphoton - 2> /dev/null; then
++# 		echo "--with-photon requires libphoton."
++# 		echo "Please install then re-run this script."
++# 		exit 1
++# 	fi
++# fi
++
+ if [[ "${CONFIG[ISCSI_INITIATOR]}" = "y" ]]; then
+ 	# Fedora installs libiscsi to /usr/lib64/iscsi for some reason.
+ 	if ! echo -e '#include <iscsi/iscsi.h>\n#include <iscsi/scsi-lowlevel.h>\n' \
+diff --git a/examples/bdev/hello_world/bdev_photon.json b/examples/bdev/hello_world/bdev_photon.json
+new file mode 100644
+index 000000000..b0405e8c4
+--- /dev/null
++++ b/examples/bdev/hello_world/bdev_photon.json
+@@ -0,0 +1,15 @@
++{
++  "subsystems": [
++    {
++      "subsystem": "bdev",
++      "config": [
++        {
++          "method": "bdev_photon_create",
++          "params": {
++            "num_blocks": 1024
++          }
++        }
++      ]
++    }
++  ]
++}
+diff --git a/examples/bdev/hello_world/hello_bdev.c b/examples/bdev/hello_world/hello_bdev.c
+index 9bfa6ee78..9efc98d76 100644
+--- a/examples/bdev/hello_world/hello_bdev.c
++++ b/examples/bdev/hello_world/hello_bdev.c
+@@ -40,7 +40,9 @@
+ #include "spdk/string.h"
+ #include "spdk/bdev_zone.h"
+ 
+-static char *g_bdev_name = "Malloc0";
++// static char *g_bdev_name = "Malloc0";
++static char *g_bdev_name = "Photon0";
++
+ 
+ /*
+  * We'll use this struct to gather housekeeping hello_context to pass between
+diff --git a/include/spdk/log.h b/include/spdk/log.h
+index ad850ab08..3a0757780 100644
+--- a/include/spdk/log.h
++++ b/include/spdk/log.h
+@@ -215,8 +215,8 @@ void spdk_log_register_flag(const char *name, struct spdk_log_flag *flag);
+ 
+ #define SPDK_LOG_REGISTER_COMPONENT(FLAG) \
+ struct spdk_log_flag SPDK_LOG_##FLAG = { \
+-	.enabled = false, \
+ 	.name = #FLAG, \
++	.enabled = false, \
+ }; \
+ __attribute__((constructor)) static void register_flag_##FLAG(void) \
+ { \
+diff --git a/mk/spdk.lib_deps.mk b/mk/spdk.lib_deps.mk
+index ece8233ff..559ae1814 100644
+--- a/mk/spdk.lib_deps.mk
++++ b/mk/spdk.lib_deps.mk
+@@ -146,6 +146,7 @@ DEPDIRS-bdev_passthru := $(BDEV_DEPS_THREAD)
+ DEPDIRS-bdev_pmem := $(BDEV_DEPS_THREAD)
+ DEPDIRS-bdev_raid := $(BDEV_DEPS_THREAD)
+ DEPDIRS-bdev_rbd := $(BDEV_DEPS_THREAD)
++DEPDIRS-bdev_photon := $(BDEV_DEPS_THREAD)
+ DEPDIRS-bdev_uring := $(BDEV_DEPS_THREAD)
+ DEPDIRS-bdev_virtio := $(BDEV_DEPS_THREAD) virtio
+ DEPDIRS-bdev_zone_block := $(BDEV_DEPS_THREAD)
+diff --git a/mk/spdk.modules.mk b/mk/spdk.modules.mk
+index 415a3b2d7..8483a165d 100644
+--- a/mk/spdk.modules.mk
++++ b/mk/spdk.modules.mk
+@@ -96,6 +96,11 @@ BLOCKDEV_MODULES_LIST += bdev_rbd
+ BLOCKDEV_MODULES_PRIVATE_LIBS += -lrados -lrbd
+ endif
+ 
++ifeq ($(CONFIG_PHOTON), y)
++BLOCKDEV_MODULES_LIST += bdev_photon
++BLOCKDEV_MODULES_PRIVATE_LIBS += -lstdc++ -lphoton
++endif
++
+ ifeq ($(CONFIG_PMDK),y)
+ BLOCKDEV_MODULES_LIST += bdev_pmem
+ BLOCKDEV_MODULES_PRIVATE_LIBS += -lpmemblk -lpmem
+diff --git a/module/bdev/Makefile b/module/bdev/Makefile
+index bbf33fdfe..3af807323 100644
+--- a/module/bdev/Makefile
++++ b/module/bdev/Makefile
+@@ -52,6 +52,7 @@ DIRS-$(CONFIG_PMDK) += pmem
+ endif
+ 
+ DIRS-$(CONFIG_RBD) += rbd
++DIRS-$(CONFIG_PHOTON) += photon
+ 
+ .PHONY: all clean $(DIRS-y)
+ 
+diff --git a/module/bdev/photon/Makefile b/module/bdev/photon/Makefile
+new file mode 100644
+index 000000000..f86676c51
+--- /dev/null
++++ b/module/bdev/photon/Makefile
+@@ -0,0 +1,13 @@
++SPDK_ROOT_DIR := $(abspath $(CURDIR)/../../..)
++include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
++
++SO_VER := 4
++SO_MINOR := 0
++
++C_SRCS = bdev_photon_rpc.c
++CXX_SRCS = bdev_photon.cpp
++LIBNAME = bdev_photon
++
++SPDK_MAP_FILE = $(SPDK_ROOT_DIR)/mk/spdk_blank.map
++
++include $(SPDK_ROOT_DIR)/mk/spdk.lib.mk
+\ No newline at end of file
+diff --git a/module/bdev/photon/bdev_photon.cpp b/module/bdev/photon/bdev_photon.cpp
+new file mode 100644
+index 000000000..dcfca88a3
+--- /dev/null
++++ b/module/bdev/photon/bdev_photon.cpp
+@@ -0,0 +1,466 @@
++#include "bdev_photon.h"
++
++#include "spdk/log.h"
++
++#include <photon/photon.h>
++#include <photon/net/socket.h>
++#include <photon/rpc/rpc.h>
++#include <photon/thread/thread11.h>
++#include <photon/thread/workerpool.h>
++
++struct Operation {
++    const static uint32_t IID = 0x111;
++};
++
++struct InitDevice: public Operation {
++    const static uint32_t FID = 0x777;
++
++    struct Request : public photon::rpc::Message {
++        photon::rpc::string trid;
++        uint32_t nsid;
++        PROCESS_FIELDS(trid, nsid);
++    };
++
++    struct Response : public photon::rpc::Message {
++        int rc;
++        uint32_t sector_size;
++        uint64_t num_sectors;
++        PROCESS_FIELDS(rc, sector_size, num_sectors);
++    };
++};
++
++struct WritevBlocks: public Operation {
++    const static uint32_t FID = 0x333;
++
++    struct Request : public photon::rpc::Message {
++        uint64_t offset_blocks;
++        uint64_t num_blocks;
++        photon::rpc::aligned_iovec_array buf;
++        PROCESS_FIELDS(offset_blocks, num_blocks, buf);
++    };
++
++    struct Response : public photon::rpc::Message {
++        int rc;
++        PROCESS_FIELDS(rc);
++    };
++};
++
++struct ReadvBlocks: public Operation {
++    const static uint32_t FID = 0x555;
++
++    struct Request : public photon::rpc::Message {
++        uint64_t offset_blocks;
++        uint64_t num_blocks;
++        PROCESS_FIELDS(offset_blocks, num_blocks);
++    };
++
++    struct Response : public photon::rpc::Message {
++        int rc;
++        photon::rpc::aligned_iovec_array buf;
++        PROCESS_FIELDS(rc, buf);
++    };
++};
++
++class RPCClient {
++public:
++    RPCClient(std::string ip="127.0.0.1", uint16_t port=43548, uint64_t expiration=10UL * 1000 * 1000, uint64_t timeout=1UL * 1000 * 1000)
++    :
++    ep_(ip.c_str(), port),
++    expiration_(expiration), timeout_(timeout),
++    stub_pool_(photon::rpc::new_stub_pool(expiration_, timeout_))
++    {
++        SPDK_NOTICELOG("RPCClient construct\n");
++    }
++
++    ~RPCClient() {
++        SPDK_NOTICELOG("RPCClient destruct begin\n");
++        stub_pool_.reset();
++        SPDK_NOTICELOG("RPCClient destruct done\n");
++    }
++
++    int do_rpc_init_device() {
++        SPDK_NOTICELOG("do_rpc_init_device\n");
++        InitDevice::Request req;
++        req.trid = "trtype:pcie traddr:0000:86:00.0";
++        req.nsid = 1;
++
++        InitDevice::Response resp;
++        resp.rc = -1;
++
++        auto stub = stub_pool_->get_stub(ep_, false);
++        assert(stub != nullptr);
++        DEFER(stub_pool_->put_stub(ep_, false));
++
++        int rc = stub->call<InitDevice>(req, resp);
++        if (rc < 0) return rc;
++        return resp.rc;
++    }
++
++    int do_rpc_writev_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++        SPDK_NOTICELOG("do_rpc_writev_blocks\n");
++        WritevBlocks::Request req;
++        req.offset_blocks = offset_blocks;
++        req.num_blocks = num_blocks;
++        req.buf.assign(iov, iovcnt);
++
++        WritevBlocks::Response resp;
++        resp.rc = -1;
++
++        auto stub = stub_pool_->get_stub(ep_, false);
++        assert(stub != nullptr);
++        DEFER(stub_pool_->put_stub(ep_, false));
++
++        int rc = stub->call<WritevBlocks>(req, resp);
++        if (rc < 0) return rc;
++        return resp.rc;
++    }
++
++    int do_rpc_readv_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++        SPDK_NOTICELOG("do_rpc_readv_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
++        ReadvBlocks::Request req;
++        req.offset_blocks = offset_blocks;
++        req.num_blocks = num_blocks;
++
++        ReadvBlocks::Response resp;
++        resp.rc = -1;
++        resp.buf.assign(iov, iovcnt);
++
++        auto stub = stub_pool_->get_stub(ep_, false);
++        assert(stub != nullptr);
++        DEFER(stub_pool_->put_stub(ep_, false));
++
++        int rc = stub->call<ReadvBlocks>(req, resp);
++        if (rc < 0) return rc;
++        return resp.rc;
++    }
++
++private:
++    photon::net::EndPoint ep_;
++    uint64_t expiration_;
++    uint64_t timeout_;
++    std::unique_ptr<photon::rpc::StubPool> stub_pool_;
++};
++
++class Client {
++public:
++    Client() : wp_(new photon::WorkPool(0)) {
++        SPDK_NOTICELOG("Client construct begin\n");
++        sem_t sem;
++        sem_init(&sem, 0, 0);
++        for (int i=0; i<1; i++) {
++            ths_.emplace_back([this](sem_t* sem){
++                SPDK_NOTICELOG("wp thread init begin\n");
++                photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
++                DEFER({
++                    SPDK_NOTICELOG("photon fini begin\n");
++                    photon::fini();
++                    SPDK_NOTICELOG("photon fini done\n");
++                });
++                assert(rpc_client_ == NULL);
++                rpc_client_ = std::make_unique<RPCClient>();
++                auto delete_rpc_client = [this]() {
++                    SPDK_NOTICELOG("fini hook begin\n");
++                    if (rpc_client_ != NULL) {
++                        SPDK_NOTICELOG("rpc client not null\n");
++                    }
++                    else {
++                        SPDK_NOTICELOG("error: rpc client null\n");
++                    }
++                    rpc_client_.reset();
++                    SPDK_NOTICELOG("fini hook done\n");
++                };
++                photon::fini_hook(delete_rpc_client);
++                sem_post(sem);
++                SPDK_NOTICELOG("wp thread init done\n");
++                wp_->join_current_vcpu_into_workpool();
++            }, &sem);
++        }
++        sem_wait(&sem);
++        SPDK_NOTICELOG("Client construct done\n");
++    }
++
++    ~Client() {
++        SPDK_NOTICELOG("Client destruct begin\n");
++        wp_.reset();
++        SPDK_NOTICELOG("Client destruct after wp reset\n");
++        for (auto& th: ths_) th.join();
++        SPDK_NOTICELOG("Client destruct done\n");
++    }
++
++    int init_device() {
++        SPDK_NOTICELOG("init_device\n");
++        wp_->call<photon::StdContext>([]{
++            SPDK_NOTICELOG("init_device, get into wp call, before assert check\n");
++            assert(rpc_client_ != NULL);
++            SPDK_NOTICELOG("init_device, get into wp call, after assert check\n");
++            rpc_client_->do_rpc_init_device();
++            SPDK_NOTICELOG("init_device, rpc done\n");
++        });
++        return 0;
++    }
++
++    int writev_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++        SPDK_NOTICELOG("writev_blocks\n");
++        wp_->call<photon::StdContext>([iov, iovcnt, offset_blocks, num_blocks]{
++            SPDK_NOTICELOG("writev_blocks, get into wp call, before assert check\n");
++            assert(rpc_client_ != NULL);
++            SPDK_NOTICELOG("writev_blocks, get into wp call, after assert check\n");
++            rpc_client_->do_rpc_writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
++            SPDK_NOTICELOG("writev_blocks, rpc done\n");
++        });
++        return 0;
++    }
++
++    int readv_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++        SPDK_NOTICELOG("readv_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
++        wp_->call<photon::StdContext>([iov, iovcnt, offset_blocks, num_blocks]{
++            SPDK_NOTICELOG("readv_blocks, get into wp call, before assert check\n");
++            assert(rpc_client_ != NULL);
++            SPDK_NOTICELOG("readv_blocks, get into wp call, after assert check\n");
++            rpc_client_->do_rpc_readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
++            SPDK_NOTICELOG("readv_blocks, rpc done\n");
++        });
++        return 0;
++    }
++
++private:
++    static thread_local std::unique_ptr<RPCClient> rpc_client_;
++    std::unique_ptr<photon::WorkPool> wp_;
++    std::vector<std::thread> ths_;
++};
++thread_local std::unique_ptr<RPCClient> Client::rpc_client_;
++
++
++struct photon_bdev {
++    struct spdk_bdev bdev;
++    Client* client;
++};
++
++struct photon_task_context {
++    enum spdk_bdev_io_status status;
++};
++
++struct module_io_channel_context {
++
++};
++
++struct disk_io_channel_context {
++    struct module_io_channel_context *module_ioch_ctx;
++};
++
++
++static int bdev_photon_module_init(void);
++static void bdev_photon_module_fini(void);
++
++static int bdev_photon_get_ctx_size(void) {
++    return sizeof(struct photon_task_context);
++}
++
++static struct spdk_bdev_module photon_if = {
++    .module_init = bdev_photon_module_init,
++    .module_fini = bdev_photon_module_fini,
++	.name = "photon",
++    .get_ctx_size = bdev_photon_get_ctx_size
++};
++SPDK_BDEV_MODULE_REGISTER(photon, &photon_if)
++
++static int module_io_channel_create_cb(void *io_device, void *ctx_buf) {
++    SPDK_INFOLOG(bdev_photon, "module_io_channel_create_cb\n");
++    struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)ctx_buf;
++    return 0;
++}
++
++static void module_io_channel_destroy_cb(void *io_device, void *ctx_buf) {
++    SPDK_INFOLOG(bdev_photon, "module_io_channel_destroy_cb\n");
++    struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)ctx_buf;
++}
++
++
++static int bdev_photon_module_init(void) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_module_init\n");
++    spdk_io_device_register(&photon_if, module_io_channel_create_cb, module_io_channel_destroy_cb, sizeof(struct module_io_channel_context), "PhotonModule");
++    return 0;
++}
++
++static void bdev_photon_module_fini(void) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_module_fini\n");
++    spdk_io_device_unregister(&photon_if, NULL);
++}
++
++
++
++
++static int bdev_photon_destruct(void *ctx) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_destruct\n");
++
++    struct photon_bdev *pt_bdev = (struct photon_bdev*)ctx;
++
++    assert(pt_bdev != NULL);
++    assert(pt_bdev->client != NULL);
++    delete pt_bdev->client;
++
++    spdk_io_device_unregister(pt_bdev, NULL);
++    free(pt_bdev);
++
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_destruct done\n");
++	return 0;
++}
++
++static void bdev_photon_readv(struct photon_bdev* pt_bdev, struct photon_task_context* task_ctx, struct spdk_io_channel* ch, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_readv, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
++    struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)spdk_io_channel_get_ctx(ch);
++    assert(disk_ioch_ctx != NULL);
++    assert(disk_ioch_ctx->module_ioch_ctx != NULL);
++    assert(pt_bdev != NULL);
++    assert(pt_bdev->client != NULL);
++    pt_bdev->client->readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
++    return;
++}
++
++static void bdev_photon_writev(struct photon_bdev* pt_bdev, struct photon_task_context* task_ctx, struct spdk_io_channel* ch, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_writev, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
++    struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)spdk_io_channel_get_ctx(ch);
++    assert(disk_ioch_ctx != NULL);
++    assert(disk_ioch_ctx->module_ioch_ctx != NULL);
++    assert(pt_bdev != NULL);
++    assert(pt_bdev->client != NULL);
++    pt_bdev->client->writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
++    return;
++}
++
++static void bdev_photon_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_submit_request, type is %d\n", bdev_io->type);
++
++    switch (bdev_io->type) {
++    case SPDK_BDEV_IO_TYPE_READ:
++        bdev_photon_readv(
++            (struct photon_bdev*)bdev_io->bdev->ctxt,
++            (struct photon_task_context*)bdev_io->driver_ctx,
++            ch, bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
++            bdev_io->u.bdev.offset_blocks,
++            bdev_io->u.bdev.num_blocks
++        );
++        spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
++        break;
++    case SPDK_BDEV_IO_TYPE_WRITE:
++        bdev_photon_writev(
++            (struct photon_bdev*)bdev_io->bdev->ctxt,
++            (struct photon_task_context*)bdev_io->driver_ctx,
++            ch, bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
++            bdev_io->u.bdev.offset_blocks,
++            bdev_io->u.bdev.num_blocks
++        );
++        spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
++        break;
++    default:
++        SPDK_ERRLOG("Unsupported io type %d\n", bdev_io->type);
++        spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
++		break;
++    }
++}
++
++static bool bdev_photon_io_type_supported(void *ctx, enum spdk_bdev_io_type io_type) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_io_type_supported\n");
++    switch (io_type)
++    {
++    case SPDK_BDEV_IO_TYPE_READ:
++    case SPDK_BDEV_IO_TYPE_WRITE:
++        return true;
++    default:
++        return false;
++    }
++}
++
++static struct spdk_io_channel* bdev_photon_get_io_channel(void *io_device) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_get_io_channel\n");
++    struct photon_bdev *pt_bdev = (struct photon_bdev*)io_device;
++    return spdk_get_io_channel(pt_bdev);
++}
++
++static void bdev_photon_write_json_config(struct spdk_bdev *bdev, struct spdk_json_write_ctx *w) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_write_json_config\n");
++    return;
++}
++
++static const struct spdk_bdev_fn_table bdev_photon_fn_table = {
++	.destruct		= bdev_photon_destruct,
++	.submit_request		= bdev_photon_submit_request,
++	.io_type_supported	= bdev_photon_io_type_supported,
++	.get_io_channel		= bdev_photon_get_io_channel,
++	.write_config_json	= bdev_photon_write_json_config,
++};
++
++
++static int disk_io_channel_create_cb(void* io_device, void* ctx_buf) {
++    SPDK_INFOLOG(bdev_photon, "disk_io_channel_create_cb\n");
++    struct photon_bdev* pt_bdev = (struct photon_bdev*)io_device; (void)pt_bdev;
++    struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)ctx_buf;
++    disk_ioch_ctx->module_ioch_ctx = (struct module_io_channel_context*)spdk_io_channel_get_ctx(spdk_get_io_channel(&photon_if));
++    return 0;
++}
++
++static void disk_io_channel_destroy_cb(void* io_device, void* ctx_buf) {
++    SPDK_INFOLOG(bdev_photon, "disk_io_channel_destroy_cb\n");
++    struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)ctx_buf;
++    assert(disk_ioch_ctx->module_ioch_ctx != NULL);
++    spdk_put_io_channel(spdk_io_channel_from_ctx(disk_ioch_ctx->module_ioch_ctx));
++    return;
++}
++
++static void* create_rpc_client(void* arg) {
++    SPDK_INFOLOG(bdev_photon, "create_rpc_client begin\n");
++    struct photon_bdev* pt_bdev = (struct photon_bdev*)arg;
++    assert(pt_bdev->client == NULL);
++    pt_bdev->client = new Client();
++    SPDK_INFOLOG(bdev_photon, "create_rpc_client done\n");
++    return nullptr;
++}
++
++extern "C" int bdev_photon_create(struct spdk_bdev **bdev) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_create\n");
++
++    struct photon_bdev* pt_bdev = (struct photon_bdev* )calloc(1, sizeof(struct photon_bdev));
++    if (!bdev) {
++        SPDK_ERRLOG("bdev_photon_create: calloc failed\n");
++        return -ENOMEM;
++    }
++
++    spdk_call_unaffinitized(create_rpc_client, pt_bdev);
++    assert(pt_bdev->client != NULL);
++    pt_bdev->client->init_device();
++
++    pt_bdev->bdev.name = strdup("Photon0");
++    pt_bdev->bdev.product_name = strdup("Photon implemented Disk");
++    pt_bdev->bdev.write_cache = 0;
++    pt_bdev->bdev.blocklen = 512;
++    pt_bdev->bdev.blockcnt = 1024;
++    pt_bdev->bdev.fn_table = &bdev_photon_fn_table;
++    pt_bdev->bdev.module = &photon_if;
++    pt_bdev->bdev.ctxt = pt_bdev;
++    spdk_uuid_generate(&pt_bdev->bdev.uuid);
++
++    spdk_io_device_register(pt_bdev, disk_io_channel_create_cb, disk_io_channel_destroy_cb, sizeof(struct disk_io_channel_context), "PhotonDisk");
++
++    int rc = spdk_bdev_register(&pt_bdev->bdev);
++    if (rc) {
++        free(pt_bdev);
++        return rc;
++    }
++
++    *bdev = &pt_bdev->bdev;
++
++    return 0;
++}
++
++extern "C" void bdev_photon_delete(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void *cb_arg) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_delete\n");
++
++    if (!bdev || bdev->module != &photon_if) {
++        cb_fn(cb_arg, -ENODEV);
++        return;
++    }
++
++    spdk_bdev_unregister(bdev, cb_fn, cb_arg);
++}
++
++SPDK_LOG_REGISTER_COMPONENT(bdev_photon)
+\ No newline at end of file
+diff --git a/module/bdev/photon/bdev_photon.h b/module/bdev/photon/bdev_photon.h
+new file mode 100644
+index 000000000..4d76edb3d
+--- /dev/null
++++ b/module/bdev/photon/bdev_photon.h
+@@ -0,0 +1,21 @@
++#ifndef SPDK_BDEV_PHOTON_H
++#define SPDK_BDEV_PHOTON_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#include "spdk/stdinc.h"
++#include "spdk/bdev.h"
++#include "spdk/bdev_module.h"
++#include "spdk/env.h"
++
++int bdev_photon_create(struct spdk_bdev **bdev);
++
++void bdev_photon_delete(struct spdk_bdev *bdev, spdk_bdev_unregister_cb cb_fn, void *cb_arg);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* SPDK_BDEV_PHOTON_H */
+\ No newline at end of file
+diff --git a/module/bdev/photon/bdev_photon_rpc.c b/module/bdev/photon/bdev_photon_rpc.c
+new file mode 100644
+index 000000000..194c229de
+--- /dev/null
++++ b/module/bdev/photon/bdev_photon_rpc.c
+@@ -0,0 +1,83 @@
++#include "bdev_photon.h"
++
++#include "spdk/rpc.h"
++#include "spdk/log.h"
++#include "spdk/util.h"
++#include "spdk/string.h"
++
++struct rpc_create_bdev_photon_requset {
++    uint64_t num_blocks;
++};
++
++struct rpc_delete_bdev_photon_requset {
++    char *name;
++};
++
++static const struct spdk_json_object_decoder rpc_bdev_photon_create_decoders[] = {
++    {"num_blocks", offsetof(struct rpc_create_bdev_photon_requset, num_blocks), spdk_json_decode_uint64},
++};
++
++static const struct spdk_json_object_decoder rpc_bdev_photon_delete_decoders[] = {
++    {"name", offsetof(struct rpc_delete_bdev_photon_requset, name), spdk_json_decode_string},
++};
++
++static void rpc_bdev_photon_create(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params) {
++    SPDK_NOTICELOG("rpc_bdev_photon_create\n");
++
++    struct rpc_create_bdev_photon_requset req;
++    if (spdk_json_decode_object(params, rpc_bdev_photon_create_decoders, SPDK_COUNTOF(rpc_bdev_photon_create_decoders), &req)) {
++        SPDK_NOTICELOG("spdk_json_decode_object failed\n");
++        spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "spdk_json_decode_object failed");
++        return;
++    }
++
++    SPDK_NOTICELOG("num_blocks=%ld\n", req.num_blocks);
++
++    struct spdk_bdev *bdev;
++    int rc = bdev_photon_create(&bdev);
++    if (rc) {
++        spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
++        return;
++    }
++
++    struct spdk_json_write_ctx *w;
++    w = spdk_jsonrpc_begin_result(request);
++    spdk_json_write_string(w, spdk_bdev_get_name(bdev));
++    spdk_jsonrpc_end_result(request, w);
++
++}
++SPDK_RPC_REGISTER("bdev_photon_create", rpc_bdev_photon_create, SPDK_RPC_RUNTIME)
++SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_photon_create, construct_photon_bdev)
++
++
++static void rpc_bdev_photon_delete_cb(void *cb_arg, int rc) {
++    struct spdk_jsonrpc_request *request = cb_arg;
++    spdk_jsonrpc_send_bool_response(request, rc == 0);
++}
++
++static void rpc_bdev_photon_delete(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params) {
++    SPDK_NOTICELOG("rpc_bdev_photon_delete\n");
++
++    struct rpc_delete_bdev_photon_requset req = {NULL};
++    if (spdk_json_decode_object(params, rpc_bdev_photon_delete_decoders, SPDK_COUNTOF(rpc_bdev_photon_delete_decoders), &req)) {
++        SPDK_NOTICELOG("spdk_json_decode_object failed\n");
++        spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR, "spdk_json_decode_object failed");
++        free(req.name);
++        return;
++    }
++
++    SPDK_NOTICELOG("name=%s\n", req.name);
++
++    struct spdk_bdev *bdev = spdk_bdev_get_by_name(req.name);
++    if (bdev == NULL) {
++        SPDK_NOTICELOG("bdev '%s' does not exist\n", req.name);
++        spdk_jsonrpc_send_error_response(request, -ENODEV, spdk_strerror(ENODEV));
++        free(req.name);
++        return;
++    }
++
++    bdev_photon_delete(bdev, rpc_bdev_photon_delete_cb, request);
++    free(req.name);
++}
++SPDK_RPC_REGISTER("bdev_photon_delete", rpc_bdev_photon_delete, SPDK_RPC_RUNTIME)
++SPDK_RPC_REGISTER_ALIAS_DEPRECATED(bdev_photon_delete, delete_photon_bdev)
+\ No newline at end of file
+diff --git a/rpc_server.cpp b/rpc_server.cpp
+new file mode 100644
+index 000000000..26e0e1dcb
+--- /dev/null
++++ b/rpc_server.cpp
+@@ -0,0 +1,91 @@
++#include <photon/photon.h>
++#include <photon/rpc/rpc.h>
++#include <photon/net/socket.h>
++#include <photon/common/alog-stdstring.h>
++
++struct MyOperation {
++    const static uint32_t IID = 0x111;
++};
++
++struct WritevBlocks: public MyOperation {
++    const static uint32_t FID = 0x333;
++
++    struct Request : public photon::rpc::Message {
++        uint64_t offset_blocks;
++        uint64_t num_blocks;
++        photon::rpc::aligned_iovec_array buf;
++        PROCESS_FIELDS(offset_blocks, num_blocks, buf);
++    };
++
++    struct Response : public photon::rpc::Message {
++        int rc;
++        PROCESS_FIELDS(rc);
++    };
++};
++
++struct ReadvBlocks: public MyOperation {
++    const static uint32_t FID = 0x555;
++
++    struct Request : public photon::rpc::Message {
++        uint64_t offset_blocks;
++        uint64_t num_blocks;
++        PROCESS_FIELDS(offset_blocks, num_blocks);
++    };
++
++    struct Response : public photon::rpc::Message {
++        int rc;
++        photon::rpc::aligned_iovec_array buf;
++        PROCESS_FIELDS(rc, buf);
++    };
++};
++
++class RPCServer {
++public:
++    RPCServer(std::string ip="127.0.0.1", uint16_t port=43548)
++    :
++    ep_(ip.c_str(), port),
++    socket_server_(photon::net::new_tcp_socket_server()),
++    skeleton_(photon::rpc::new_skeleton()) {
++        skeleton_->register_service<WritevBlocks, ReadvBlocks>(this);
++    }
++
++    int do_rpc_service(WritevBlocks::Request* req, WritevBlocks::Response* resp, IOVector*, IStream*) {
++        LOG_INFO("recieve writevblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
++        resp->rc = 0;
++        return 0;
++    }
++
++    int do_rpc_service(ReadvBlocks::Request* req, ReadvBlocks::Response* resp, IOVector*, IStream*) {
++        LOG_INFO("recieve readvblocks request: ", VALUE(req->offset_blocks), VALUE(req->num_blocks));
++        resp->rc = 0;
++        return 0;
++    }
++
++    int run() {
++        LOG_INFO("server run");
++        auto handler = [&](photon::net::ISocketStream* socket_stream) {
++            LOG_INFO("get into handler");
++            return skeleton_->serve(socket_stream);
++        };
++
++        socket_server_->set_handler(handler);
++        socket_server_->bind(ep_);
++        socket_server_->listen();
++
++        int rc = socket_server_->start_loop(true);
++        return rc;
++    }
++
++private:
++    photon::net::EndPoint ep_;
++    std::unique_ptr<photon::net::ISocketServer> socket_server_;
++    std::unique_ptr<photon::rpc::Skeleton> skeleton_;
++};
++
++int main() {
++    photon::init();
++    DEFER(photon::fini());
++
++    RPCServer server;
++    server.run();
++}
+\ No newline at end of file
+diff --git a/run.sh b/run.sh
+new file mode 100644
+index 000000000..b2e15944f
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,7 @@
++export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/build/lib:$LD_LIBRARY_PATH
++export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/dpdk/build/lib:$LD_LIBRARY_PATH
++# ./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev.json
++# ./build/examples/hello_world
++# ./build/examples/nvmf -m 0xf -r /var/tmp/spdk.sock
++./build/bin/nvmf_tgt --logflag=bdev_photon
++# ./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
+\ No newline at end of file
+diff --git a/run2.sh b/run2.sh
+new file mode 100644
+index 000000000..d498ff76d
+--- /dev/null
++++ b/run2.sh
+@@ -0,0 +1,9 @@
++export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/build/lib:$LD_LIBRARY_PATH
++export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/dpdk/build/lib:$LD_LIBRARY_PATH
++
++./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
++# ./build/examples/hello_world
++# ./build/examples/nvmf -m 0xf -r /var/tmp/spdk.sock
++
++# ./build/examples/perf -q 64 -o 4095 -w randrw -M 30 -l -t 60 \
++	# -r "trtype:tcp adrfam:IPv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1"
+\ No newline at end of file
+diff --git a/scripts/rpc.py b/scripts/rpc.py
+index f60863cb0..ad13e7bf2 100755
+--- a/scripts/rpc.py
++++ b/scripts/rpc.py
+@@ -360,6 +360,20 @@ if __name__ == "__main__":
+     p.add_argument('name', help='malloc bdev name')
+     p.set_defaults(func=bdev_malloc_delete)
+ 
++    def bdev_photon_create(args):
++        print_json(rpc.bdev.bdev_photon_create(args.client, args.num_blocks))
++    p = subparsers.add_parser('bdev_photon_create', aliases=['construct_photon_bdev'],
++                              help='Add a bdev with photon backend')
++    p.add_argument('--num_blocks', help='Number of blocks in the bdev', type=int)
++    p.set_defaults(func=bdev_photon_create)
++
++    def bdev_photon_delete(args):
++        rpc.bdev.bdev_photon_delete(args.client, args.name)
++    p = subparsers.add_parser('bdev_photon_delete', aliases=['delete_photon_bdev'],
++                              help='Delete a photon bdev')
++    p.add_argument('--name', help='Name of photon bdev')
++    p.set_defaults(func=bdev_photon_delete)
++
+     def bdev_null_create(args):
+         num_blocks = (args.total_size * 1024 * 1024) // args.block_size
+         if args.dif_type and not args.md_size:
+diff --git a/scripts/rpc/bdev.py b/scripts/rpc/bdev.py
+index 83cb1eb60..818348352 100644
+--- a/scripts/rpc/bdev.py
++++ b/scripts/rpc/bdev.py
+@@ -253,6 +253,16 @@ def bdev_malloc_delete(client, name):
+     params = {'name': name}
+     return client.call('bdev_malloc_delete', params)
+ 
++@deprecated_alias('construct_photon_bdev')
++def bdev_photon_create(client, num_blocks):
++    params = {'num_blocks': num_blocks}
++    return client.call('bdev_photon_create', params)
++
++@deprecated_alias('delete_photon_bdev')
++def bdev_photon_delete(client, name):
++    params = {'name': name}
++    return client.call('bdev_photon_delete', params)
++
+ 
+ @deprecated_alias('construct_null_bdev')
+ def bdev_null_create(client, num_blocks, block_size, name, uuid=None, md_size=None,
+-- 
+2.34.0
+
+
+From 6e6055c1da1e4056ca345bf8e43395e23d704308 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=A9=A7=E7=91=84?= <hongjingxuan.hjx@alibaba-inc.com>
+Date: Mon, 14 Jul 2025 18:34:56 +0800
+Subject: [PATCH 2/3] change call to async_call
+
+---
+ module/bdev/photon/bdev_photon.cpp | 174 +++++++++++++++++++++--------
+ rpc_config.sh                      |   7 ++
+ run2.sh                            |   6 +-
+ 3 files changed, 135 insertions(+), 52 deletions(-)
+ create mode 100644 rpc_config.sh
+
+diff --git a/module/bdev/photon/bdev_photon.cpp b/module/bdev/photon/bdev_photon.cpp
+index dcfca88a3..1b39722f7 100644
+--- a/module/bdev/photon/bdev_photon.cpp
++++ b/module/bdev/photon/bdev_photon.cpp
+@@ -8,6 +8,9 @@
+ #include <photon/thread/thread11.h>
+ #include <photon/thread/workerpool.h>
+ 
++#include <sys/epoll.h>
++#include <unistd.h>
++
+ struct Operation {
+     const static uint32_t IID = 0x111;
+ };
+@@ -141,6 +144,10 @@ private:
+     std::unique_ptr<photon::rpc::StubPool> stub_pool_;
+ };
+ 
++struct photon_task_context {
++    enum spdk_bdev_io_status status;
++};
++
+ class Client {
+ public:
+     Client() : wp_(new photon::WorkPool(0)) {
+@@ -199,27 +206,35 @@ public:
+         return 0;
+     }
+ 
+-    int writev_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
+-        SPDK_NOTICELOG("writev_blocks\n");
+-        wp_->call<photon::StdContext>([iov, iovcnt, offset_blocks, num_blocks]{
+-            SPDK_NOTICELOG("writev_blocks, get into wp call, before assert check\n");
+-            assert(rpc_client_ != NULL);
+-            SPDK_NOTICELOG("writev_blocks, get into wp call, after assert check\n");
+-            rpc_client_->do_rpc_writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
+-            SPDK_NOTICELOG("writev_blocks, rpc done\n");
+-        });
+-        return 0;
+-    }
++    int readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx, int pipe_write_fd) {
++        SPDK_NOTICELOG("readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d, task_ctx=%p\n", iovcnt, offset_blocks, num_blocks, is_write, task_ctx);
+ 
+-    int readv_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
+-        SPDK_NOTICELOG("readv_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
+-        wp_->call<photon::StdContext>([iov, iovcnt, offset_blocks, num_blocks]{
+-            SPDK_NOTICELOG("readv_blocks, get into wp call, before assert check\n");
++        auto func = [](struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx, int pipe_write_fd){
++            SPDK_NOTICELOG("readv_writev_blocks, get into wp call, before assert check\n");
+             assert(rpc_client_ != NULL);
+-            SPDK_NOTICELOG("readv_blocks, get into wp call, after assert check\n");
+-            rpc_client_->do_rpc_readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
+-            SPDK_NOTICELOG("readv_blocks, rpc done\n");
+-        });
++            SPDK_NOTICELOG("readv_writev_blocks, get into wp call, after assert check\n");
++            int rc = 0;
++            if (is_write) {
++                rc = rpc_client_->do_rpc_writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
++            }
++            else {
++                rc = rpc_client_->do_rpc_readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
++            }
++            SPDK_NOTICELOG("readv_writev_blocks, rpc done\n");
++            if (rc >= 0) {
++                SPDK_NOTICELOG("readv_writev_blocks, rpc success, task_ctx=%p\n", task_ctx);
++                task_ctx->status = SPDK_BDEV_IO_STATUS_SUCCESS;
++            }
++            else {
++                SPDK_NOTICELOG("readv_writev_blocks, rpc failed, task_ctx=%p\n", task_ctx);
++                task_ctx->status = SPDK_BDEV_IO_STATUS_FAILED;
++            }
++            if (write(pipe_write_fd, (void*)&task_ctx, sizeof(void*)) != sizeof(void*))
++            SPDK_NOTICELOG("readv_writev_blocks, eventfd_write done\n");
++        };
++
++        wp_->async_call(new auto(std::bind(func, iov, iovcnt, offset_blocks, num_blocks, is_write, task_ctx, pipe_write_fd)));
++
+         return 0;
+     }
+ 
+@@ -236,15 +251,13 @@ struct photon_bdev {
+     Client* client;
+ };
+ 
+-struct photon_task_context {
+-    enum spdk_bdev_io_status status;
+-};
+-
+ struct module_io_channel_context {
+-
++    int epoll_fd;
++    struct spdk_poller* poller;
+ };
+ 
+ struct disk_io_channel_context {
++    int pipe_fd[2];
+     struct module_io_channel_context *module_ioch_ctx;
+ };
+ 
+@@ -264,15 +277,63 @@ static struct spdk_bdev_module photon_if = {
+ };
+ SPDK_BDEV_MODULE_REGISTER(photon, &photon_if)
+ 
++
++
++static const int MAX_EVENTS_PER_POLL = 128;
++
++static int module_poller_body(void* arg) {
++    struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)arg;
++
++    struct epoll_event events[MAX_EVENTS_PER_POLL];
++    int num_events = epoll_wait(module_ioch_ctx->epoll_fd, events, MAX_EVENTS_PER_POLL, 0);
++    if (num_events <= 0) {
++		return SPDK_POLLER_IDLE;
++	}
++
++	for (int i = 0; i < num_events; i++) {
++        SPDK_NOTICELOG("module_poller_body, i=%d, num_events=%d\n", i, num_events);
++        struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)events[i].data.ptr;
++        void* buf = nullptr;
++        int rc = read(disk_ioch_ctx->pipe_fd[0], &buf, sizeof(void*));
++        if (rc == sizeof(void*)) {
++            SPDK_NOTICELOG("rc == sizeof(void*), rc=%d, task_ctx=%p\n", rc, buf);
++            struct photon_task_context* task_ctx = (struct photon_task_context*)buf;
++            assert(task_ctx != nullptr);
++            struct spdk_bdev_io* bdev_io = spdk_bdev_io_from_ctx(task_ctx);
++            assert(bdev_io != nullptr);
++            spdk_bdev_io_complete(bdev_io, task_ctx->status);
++        }
++        else {
++            SPDK_ERRLOG("rc != sizeof(void*), rc=%d\n", rc);
++        }
++	}
++
++	return SPDK_POLLER_BUSY;
++}
++
+ static int module_io_channel_create_cb(void *io_device, void *ctx_buf) {
+     SPDK_INFOLOG(bdev_photon, "module_io_channel_create_cb\n");
++
+     struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)ctx_buf;
++
++    module_ioch_ctx->epoll_fd = epoll_create1(0);
++    if (module_ioch_ctx->epoll_fd < 0) {
++        SPDK_ERRLOG("bdev_photon: epoll_create1 failed\n");
++        return -1;
++    }
++
++    module_ioch_ctx->poller = SPDK_POLLER_REGISTER(module_poller_body, module_ioch_ctx, 0);
++
+     return 0;
+ }
+ 
+ static void module_io_channel_destroy_cb(void *io_device, void *ctx_buf) {
+     SPDK_INFOLOG(bdev_photon, "module_io_channel_destroy_cb\n");
+     struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)ctx_buf;
++    if (module_ioch_ctx->epoll_fd >= 0) {
++		close(module_ioch_ctx->epoll_fd);
++	}
++    spdk_poller_unregister(&module_ioch_ctx->poller);
+ }
+ 
+ 
+@@ -306,26 +367,14 @@ static int bdev_photon_destruct(void *ctx) {
+ 	return 0;
+ }
+ 
+-static void bdev_photon_readv(struct photon_bdev* pt_bdev, struct photon_task_context* task_ctx, struct spdk_io_channel* ch, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
+-    SPDK_INFOLOG(bdev_photon, "bdev_photon_readv, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
+-    struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)spdk_io_channel_get_ctx(ch);
+-    assert(disk_ioch_ctx != NULL);
+-    assert(disk_ioch_ctx->module_ioch_ctx != NULL);
+-    assert(pt_bdev != NULL);
+-    assert(pt_bdev->client != NULL);
+-    pt_bdev->client->readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
+-    return;
+-}
+-
+-static void bdev_photon_writev(struct photon_bdev* pt_bdev, struct photon_task_context* task_ctx, struct spdk_io_channel* ch, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
+-    SPDK_INFOLOG(bdev_photon, "bdev_photon_writev, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
++static void bdev_photon_rwv(struct photon_bdev* pt_bdev, struct photon_task_context* task_ctx, struct spdk_io_channel* ch, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write) {
++    SPDK_INFOLOG(bdev_photon, "bdev_photon_rwv, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d\n", iovcnt, offset_blocks, num_blocks, is_write);
+     struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)spdk_io_channel_get_ctx(ch);
+     assert(disk_ioch_ctx != NULL);
+     assert(disk_ioch_ctx->module_ioch_ctx != NULL);
+     assert(pt_bdev != NULL);
+     assert(pt_bdev->client != NULL);
+-    pt_bdev->client->writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
+-    return;
++    pt_bdev->client->readv_writev_blocks(iov, iovcnt, offset_blocks, num_blocks, is_write, task_ctx, disk_ioch_ctx->pipe_fd[1]);
+ }
+ 
+ static void bdev_photon_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io) {
+@@ -333,24 +382,24 @@ static void bdev_photon_submit_request(struct spdk_io_channel *ch, struct spdk_b
+ 
+     switch (bdev_io->type) {
+     case SPDK_BDEV_IO_TYPE_READ:
+-        bdev_photon_readv(
++        bdev_photon_rwv(
+             (struct photon_bdev*)bdev_io->bdev->ctxt,
+             (struct photon_task_context*)bdev_io->driver_ctx,
+-            ch, bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
+-            bdev_io->u.bdev.offset_blocks,
+-            bdev_io->u.bdev.num_blocks
++            ch,
++            bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
++            bdev_io->u.bdev.offset_blocks, bdev_io->u.bdev.num_blocks,
++            false
+         );
+-        spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+         break;
+     case SPDK_BDEV_IO_TYPE_WRITE:
+-        bdev_photon_writev(
++        bdev_photon_rwv(
+             (struct photon_bdev*)bdev_io->bdev->ctxt,
+             (struct photon_task_context*)bdev_io->driver_ctx,
+-            ch, bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
+-            bdev_io->u.bdev.offset_blocks,
+-            bdev_io->u.bdev.num_blocks
++            ch,
++            bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
++            bdev_io->u.bdev.offset_blocks, bdev_io->u.bdev.num_blocks,
++            true
+         );
+-        spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_SUCCESS);
+         break;
+     default:
+         SPDK_ERRLOG("Unsupported io type %d\n", bdev_io->type);
+@@ -393,9 +442,31 @@ static const struct spdk_bdev_fn_table bdev_photon_fn_table = {
+ 
+ static int disk_io_channel_create_cb(void* io_device, void* ctx_buf) {
+     SPDK_INFOLOG(bdev_photon, "disk_io_channel_create_cb\n");
++
+     struct photon_bdev* pt_bdev = (struct photon_bdev*)io_device; (void)pt_bdev;
++
+     struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)ctx_buf;
+     disk_ioch_ctx->module_ioch_ctx = (struct module_io_channel_context*)spdk_io_channel_get_ctx(spdk_get_io_channel(&photon_if));
++
++    if (pipe(disk_ioch_ctx->pipe_fd) < 0) {
++        SPDK_ERRLOG("bdev_photon: failed to create pipe_fd\n");
++        spdk_put_io_channel(spdk_io_channel_from_ctx(disk_ioch_ctx->module_ioch_ctx));
++        return -1;
++    }
++
++    struct epoll_event event;
++    memset(&event, 0, sizeof(event));
++    event.events = EPOLLIN;
++    event.data.ptr = disk_ioch_ctx;
++
++    if (epoll_ctl(disk_ioch_ctx->module_ioch_ctx->epoll_fd, EPOLL_CTL_ADD, disk_ioch_ctx->pipe_fd[0], &event) < 0) {
++        SPDK_ERRLOG("bdev_photon: epoll_ctl failed\n");
++        close(disk_ioch_ctx->pipe_fd[0]);
++        close(disk_ioch_ctx->pipe_fd[1]);
++        spdk_put_io_channel(spdk_io_channel_from_ctx(disk_ioch_ctx->module_ioch_ctx));
++        return -1;
++    }
++
+     return 0;
+ }
+ 
+@@ -403,6 +474,11 @@ static void disk_io_channel_destroy_cb(void* io_device, void* ctx_buf) {
+     SPDK_INFOLOG(bdev_photon, "disk_io_channel_destroy_cb\n");
+     struct disk_io_channel_context* disk_ioch_ctx = (struct disk_io_channel_context*)ctx_buf;
+     assert(disk_ioch_ctx->module_ioch_ctx != NULL);
++    if (epoll_ctl(disk_ioch_ctx->module_ioch_ctx->epoll_fd, EPOLL_CTL_DEL, disk_ioch_ctx->pipe_fd[0], NULL) < 0) {
++        SPDK_ERRLOG("epoll_ctl EPOLL_CTL_DEL failed\n");
++    }
++    close(disk_ioch_ctx->pipe_fd[0]);
++    close(disk_ioch_ctx->pipe_fd[1]);
+     spdk_put_io_channel(spdk_io_channel_from_ctx(disk_ioch_ctx->module_ioch_ctx));
+     return;
+ }
+diff --git a/rpc_config.sh b/rpc_config.sh
+new file mode 100644
+index 000000000..bf284ee9c
+--- /dev/null
++++ b/rpc_config.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++sudo -v
++sudo scripts/rpc.py nvmf_create_transport -t TCP -u 16384 -m 8 -c 8192
++sudo scripts/rpc.py bdev_photon_create --num_blocks 1024
++sudo scripts/rpc.py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -d SPDK_Controller1
++sudo scripts/rpc.py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Photon0
++sudo scripts/rpc.py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t tcp -a 127.0.0.1 -s 4420
+\ No newline at end of file
+diff --git a/run2.sh b/run2.sh
+index d498ff76d..a2d483c96 100644
+--- a/run2.sh
++++ b/run2.sh
+@@ -1,9 +1,9 @@
+ export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/build/lib:$LD_LIBRARY_PATH
+ export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/dpdk/build/lib:$LD_LIBRARY_PATH
+ 
+-./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
++# ./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
+ # ./build/examples/hello_world
+ # ./build/examples/nvmf -m 0xf -r /var/tmp/spdk.sock
+ 
+-# ./build/examples/perf -q 64 -o 4095 -w randrw -M 30 -l -t 60 \
+-	# -r "trtype:tcp adrfam:IPv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1"
+\ No newline at end of file
++./build/examples/perf -q 64 -o 4095 -w randrw -M 30 -l -t 60 \
++	-r "trtype:tcp adrfam:IPv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1"
+\ No newline at end of file
+-- 
+2.34.0
+
+
+From 671b004c64b5e7641daba83ba03493dee16df825 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E5=A9=A7=E7=91=84?= <hongjingxuan.hjx@alibaba-inc.com>
+Date: Tue, 15 Jul 2025 10:10:56 +0800
+Subject: [PATCH 3/3] remove unused compile option
+
+---
+ mk/spdk.modules.mk | 2 +-
+ run2.sh            | 6 +++---
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/mk/spdk.modules.mk b/mk/spdk.modules.mk
+index 8483a165d..87f023d42 100644
+--- a/mk/spdk.modules.mk
++++ b/mk/spdk.modules.mk
+@@ -98,7 +98,7 @@ endif
+ 
+ ifeq ($(CONFIG_PHOTON), y)
+ BLOCKDEV_MODULES_LIST += bdev_photon
+-BLOCKDEV_MODULES_PRIVATE_LIBS += -lstdc++ -lphoton
++BLOCKDEV_MODULES_PRIVATE_LIBS += -lphoton
+ endif
+ 
+ ifeq ($(CONFIG_PMDK),y)
+diff --git a/run2.sh b/run2.sh
+index a2d483c96..5b87f46a5 100644
+--- a/run2.sh
++++ b/run2.sh
+@@ -1,9 +1,9 @@
+ export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/build/lib:$LD_LIBRARY_PATH
+ export LD_LIBRARY_PATH=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/dpdk/build/lib:$LD_LIBRARY_PATH
+ 
+-# ./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
++./build/examples/hello_bdev --json ./examples/bdev/hello_world/bdev_photon.json
+ # ./build/examples/hello_world
+ # ./build/examples/nvmf -m 0xf -r /var/tmp/spdk.sock
+ 
+-./build/examples/perf -q 64 -o 4095 -w randrw -M 30 -l -t 60 \
+-	-r "trtype:tcp adrfam:IPv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1"
+\ No newline at end of file
++# ./build/examples/perf -q 64 -o 4095 -w randrw -M 30 -l -t 60 \
++# 	-r "trtype:tcp adrfam:IPv4 traddr:127.0.0.1 trsvcid:4420 subnqn:nqn.2016-06.io.spdk:cnode1"
+\ No newline at end of file
+-- 
+2.34.0
+

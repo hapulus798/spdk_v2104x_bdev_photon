@@ -34,7 +34,7 @@ static void rpc_bdev_photon_create(struct spdk_jsonrpc_request *request, const s
     SPDK_NOTICELOG("num_blocks=%ld\n", req.num_blocks);
 
     struct spdk_bdev *bdev;
-    int rc = bdev_photon_create(&bdev);
+    int rc = bdev_photon_create(&bdev, req.num_blocks);
     if (rc) {
         spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
         return;
