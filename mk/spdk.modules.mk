@@ -98,7 +98,7 @@ endif
 
 ifeq ($(CONFIG_PHOTON), y)
 BLOCKDEV_MODULES_LIST += bdev_photon
-BLOCKDEV_MODULES_PRIVATE_LIBS += -lstdc++ -lphoton
+BLOCKDEV_MODULES_PRIVATE_LIBS += -lphoton
 endif
 
 ifeq ($(CONFIG_PMDK),y)
