@@ -6,6 +6,8 @@
         {
           "method": "bdev_photon_create",
           "params": {
+            "trid": "trtype:pcie traddr:0000:86:00.0",
+            "nsid": 1,
             "num_blocks": 1024
           }
         }

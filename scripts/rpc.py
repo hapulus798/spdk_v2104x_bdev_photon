@@ -361,9 +361,11 @@ if __name__ == "__main__":
     p.set_defaults(func=bdev_malloc_delete)
 
     def bdev_photon_create(args):
-        print_json(rpc.bdev.bdev_photon_create(args.client, args.num_blocks))
+        print_json(rpc.bdev.bdev_photon_create(args.client, args.trid, args.nsid, args.num_blocks))
     p = subparsers.add_parser('bdev_photon_create', aliases=['construct_photon_bdev'],
                               help='Add a bdev with photon backend')
+    p.add_argument('--trid', help='Transport ID of the bdev')
+    p.add_argument('--nsid', help='Namespace ID of the bdev', type=int)
     p.add_argument('--num_blocks', help='Number of blocks in the bdev', type=int)
     p.set_defaults(func=bdev_photon_create)
 
