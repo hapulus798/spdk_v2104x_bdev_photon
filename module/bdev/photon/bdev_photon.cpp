@@ -268,9 +268,7 @@ struct photon_bdev {
     Client* client;
 };
 
-struct module_io_channel_context {
-
-};
+struct module_io_channel_context {};
 
 struct disk_io_channel_context {
     struct module_io_channel_context *module_ioch_ctx;
@@ -287,7 +285,7 @@ static int bdev_photon_get_ctx_size(void) {
 static struct spdk_bdev_module photon_if = {
     .module_init = bdev_photon_module_init,
     .module_fini = bdev_photon_module_fini,
-	.name = "photon",
+    .name = "photon",
     .get_ctx_size = bdev_photon_get_ctx_size
 };
 SPDK_BDEV_MODULE_REGISTER(photon, &photon_if)
