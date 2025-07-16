@@ -361,12 +361,16 @@ if __name__ == "__main__":
     p.set_defaults(func=bdev_malloc_delete)
 
     def bdev_photon_create(args):
-        print_json(rpc.bdev.bdev_photon_create(args.client, args.trid, args.nsid, args.num_blocks))
+        print_json(rpc.bdev.bdev_photon_create(args.client, args.trid, args.nsid, args.num_blocks, args.ip, args.port, args.expiration, args.timeout))
     p = subparsers.add_parser('bdev_photon_create', aliases=['construct_photon_bdev'],
                               help='Add a bdev with photon backend')
     p.add_argument('--trid', help='Transport ID of the bdev')
     p.add_argument('--nsid', help='Namespace ID of the bdev', type=int)
     p.add_argument('--num_blocks', help='Number of blocks in the bdev', type=int)
+    p.add_argument('--ip', help='IP address of bdev_photon_server')
+    p.add_argument('--port', help='Port number of bdev_photon_server', type=int)
+    p.add_argument('--expiration', help='expiration time of connection to bdev_photon_server', type=int, default=10000000)
+    p.add_argument('--timeout', help='timeout for connection to bdev_photon_server', type=int, default=1000000)
     p.set_defaults(func=bdev_photon_create)
 
     def bdev_photon_delete(args):

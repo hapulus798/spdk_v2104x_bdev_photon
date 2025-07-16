@@ -1,4 +1,5 @@
 #include "bdev_photon.h"
+#include "protocol.h"
 
 #include "spdk/log.h"
 #include "spdk/string.h"
@@ -14,78 +15,9 @@
 
 SPDK_LOG_REGISTER_COMPONENT(bdev_photon)
 
-struct Operation {
-    const static uint32_t IID = 0x111;
-};
-
-struct InitDevice: public Operation {
-    const static uint32_t FID = 0x777;
-
-    struct Request : public photon::rpc::Message {
-        photon::rpc::string trid;
-        uint32_t nsid;
-        uint64_t num_blocks;
-        PROCESS_FIELDS(trid, nsid, num_blocks);
-    };
-
-    struct Response : public photon::rpc::Message {
-        int rc;
-        uint32_t sector_size;
-        uint64_t num_sectors;
-        PROCESS_FIELDS(rc, sector_size, num_sectors);
-    };
-};
-
-struct WritevBlocks: public Operation {
-    const static uint32_t FID = 0x333;
-
-    struct Request : public photon::rpc::Message {
-        uint64_t offset_blocks;
-        uint64_t num_blocks;
-        photon::rpc::aligned_iovec_array buf;
-        PROCESS_FIELDS(offset_blocks, num_blocks, buf);
-    };
-
-    struct Response : public photon::rpc::Message {
-        int rc;
-        PROCESS_FIELDS(rc);
-    };
-};
-
-struct ReadvBlocks: public Operation {
-    const static uint32_t FID = 0x555;
-
-    struct Request : public photon::rpc::Message {
-        uint64_t offset_blocks;
-        uint64_t num_blocks;
-        PROCESS_FIELDS(offset_blocks, num_blocks);
-    };
-
-    struct Response : public photon::rpc::Message {
-        int rc;
-        photon::rpc::aligned_iovec_array buf;
-        PROCESS_FIELDS(rc, buf);
-    };
-};
-
 class RPCClient {
 public:
-    RPCClient(std::string ip="127.0.0.1", uint16_t port=43548, uint64_t expiration=10UL * 1000 * 1000, uint64_t timeout=1UL * 1000 * 1000)
-    :
-    ep_(ip.c_str(), port),
-    expiration_(expiration), timeout_(timeout),
-    stub_pool_(photon::rpc::new_stub_pool(expiration_, timeout_))
-    {
-        SPDK_DEBUGLOG(bdev_photon, "RPCClient construct\n");
-    }
-
-    ~RPCClient() {
-        SPDK_DEBUGLOG(bdev_photon, "RPCClient destruct begin\n");
-        stub_pool_.reset();
-        SPDK_DEBUGLOG(bdev_photon, "RPCClient destruct done\n");
-    }
-
-    int do_rpc_init_device(const char* trid, uint32_t nsid, uint64_t num_blocks, uint32_t* block_size) {
+    int do_rpc_init_device(photon::rpc::Stub* stub, const char* trid, uint32_t nsid, uint64_t num_blocks, uint32_t* block_size) {
         SPDK_DEBUGLOG(bdev_photon, "do_rpc_init_device, num_blocks=%lu\n", num_blocks);
         InitDevice::Request req;
         req.trid.assign(trid);
@@ -97,10 +29,6 @@ public:
         resp.num_sectors = 0;
         resp.sector_size = 0;
 
-        auto stub = stub_pool_->get_stub(ep_, false);
-        assert(stub != nullptr);
-        DEFER(stub_pool_->put_stub(ep_, false));
-
         int rc = stub->call<InitDevice>(req, resp);
         if (rc < 0) return rc;
 
@@ -108,49 +36,35 @@ public:
         return resp.rc;
     }
 
-    int do_rpc_writev_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
-        SPDK_DEBUGLOG(bdev_photon, "do_rpc_writev_blocks\n");
-        WritevBlocks::Request req;
-        req.offset_blocks = offset_blocks;
-        req.num_blocks = num_blocks;
-        req.buf.assign(iov, iovcnt);
+    int do_rpc_readv_writev_blocks(photon::rpc::Stub* stub, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write) {
+        SPDK_DEBUGLOG(bdev_photon, "do_rpc_readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d\n", iovcnt, offset_blocks, num_blocks, is_write);
+        if (is_write) {
+            WritevBlocks::Request req;
+            req.offset_blocks = offset_blocks;
+            req.num_blocks = num_blocks;
+            req.buf.assign(iov, iovcnt);
 
-        WritevBlocks::Response resp;
-        resp.rc = -1;
+            WritevBlocks::Response resp;
+            resp.rc = -1;
 
-        auto stub = stub_pool_->get_stub(ep_, false);
-        assert(stub != nullptr);
-        DEFER(stub_pool_->put_stub(ep_, false));
+            int rc = stub->call<WritevBlocks>(req, resp);
+            if (rc < 0) return rc;
+            return resp.rc;
+        }
+        else {
+            ReadvBlocks::Request req;
+            req.offset_blocks = offset_blocks;
+            req.num_blocks = num_blocks;
 
-        int rc = stub->call<WritevBlocks>(req, resp);
-        if (rc < 0) return rc;
-        return resp.rc;
+            ReadvBlocks::Response resp;
+            resp.rc = -1;
+            resp.buf.assign(iov, iovcnt);
+
+            int rc = stub->call<ReadvBlocks>(req, resp);
+            if (rc < 0) return rc;
+            return resp.rc;
+        }
     }
-
-    int do_rpc_readv_blocks(struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks) {
-        SPDK_DEBUGLOG(bdev_photon, "do_rpc_readv_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu\n", iovcnt, offset_blocks, num_blocks);
-        ReadvBlocks::Request req;
-        req.offset_blocks = offset_blocks;
-        req.num_blocks = num_blocks;
-
-        ReadvBlocks::Response resp;
-        resp.rc = -1;
-        resp.buf.assign(iov, iovcnt);
-
-        auto stub = stub_pool_->get_stub(ep_, false);
-        assert(stub != nullptr);
-        DEFER(stub_pool_->put_stub(ep_, false));
-
-        int rc = stub->call<ReadvBlocks>(req, resp);
-        if (rc < 0) return rc;
-        return resp.rc;
-    }
-
-private:
-    photon::net::EndPoint ep_;
-    uint64_t expiration_;
-    uint64_t timeout_;
-    std::unique_ptr<photon::rpc::StubPool> stub_pool_;
 };
 
 struct photon_task_context {
@@ -159,107 +73,112 @@ struct photon_task_context {
 };
 
 static void msg_fn(void* arg) {
+    SPDK_DEBUGLOG(bdev_photon, "msg_fn begin\n");
     struct photon_task_context* task_ctx = (struct photon_task_context*)arg;
     struct spdk_bdev_io* bdev_io = spdk_bdev_io_from_ctx(task_ctx);
     spdk_bdev_io_complete(bdev_io, task_ctx->status);
+    SPDK_DEBUGLOG(bdev_photon, "msg_fn done\n");
 }
 
 class Client {
 public:
-    Client() : wp_(new photon::WorkPool(0)) {
+    Client() : wp_(new photon::WorkPool(0))
+    {
         SPDK_DEBUGLOG(bdev_photon, "Client construct begin\n");
         sem_t sem;
         sem_init(&sem, 0, 0);
         for (int i=0; i<1; i++) {
-            ths_.emplace_back([this](sem_t* sem){
-                SPDK_DEBUGLOG(bdev_photon, "wp thread init begin\n");
-                photon::init(photon::INIT_EVENT_EPOLL, photon::INIT_IO_LIBAIO);
-                DEFER({
-                    SPDK_DEBUGLOG(bdev_photon, "photon fini begin\n");
-                    photon::fini();
-                    SPDK_DEBUGLOG(bdev_photon, "photon fini done\n");
-                });
-                assert(rpc_client_ == NULL);
-                rpc_client_ = std::make_unique<RPCClient>();
-                auto delete_rpc_client = [this]() {
-                    SPDK_DEBUGLOG(bdev_photon, "fini hook begin\n");
-                    if (rpc_client_ != NULL) {
-                        SPDK_DEBUGLOG(bdev_photon, "rpc client not null\n");
-                    }
-                    else {
-                        SPDK_DEBUGLOG(bdev_photon, "error: rpc client null\n");
-                    }
-                    rpc_client_.reset();
-                    SPDK_DEBUGLOG(bdev_photon, "fini hook done\n");
-                };
-                photon::fini_hook(delete_rpc_client);
+            ths_.emplace_back([](sem_t* sem, photon::WorkPool* wp){
+                photon::init();
                 sem_post(sem);
-                SPDK_DEBUGLOG(bdev_photon, "wp thread init done\n");
-                wp_->join_current_vcpu_into_workpool();
-            }, &sem);
+                wp->join_current_vcpu_into_workpool();
+                photon::fini();
+            }, &sem, wp_.get());
         }
-        sem_wait(&sem);
+        for (int i=0; i<1; i++) {
+            sem_wait(&sem);
+        }
         SPDK_DEBUGLOG(bdev_photon, "Client construct done\n");
     }
 
     ~Client() {
         SPDK_DEBUGLOG(bdev_photon, "Client destruct begin\n");
+        stub_pool_.reset();
+        SPDK_DEBUGLOG(bdev_photon, "Client destruct after delete stub_pool\n");
         wp_.reset();
         SPDK_DEBUGLOG(bdev_photon, "Client destruct after wp reset\n");
         for (auto& th: ths_) th.join();
         SPDK_DEBUGLOG(bdev_photon, "Client destruct done\n");
     }
 
-    int init_device(const char* trid, uint32_t nsid, uint64_t num_blocks, uint32_t* block_size) {
-        SPDK_DEBUGLOG(bdev_photon, "init_device\n");
-        wp_->call<photon::StdContext>([=]{
-            SPDK_DEBUGLOG(bdev_photon, "init_device, get into wp call, before assert check\n");
-            assert(rpc_client_ != NULL);
-            SPDK_DEBUGLOG(bdev_photon, "init_device, get into wp call, after assert check\n");
-            rpc_client_->do_rpc_init_device(trid, nsid, num_blocks, block_size);
-            SPDK_DEBUGLOG(bdev_photon, "init_device, rpc done, block_size=%u\n", *block_size);
-        });
-        return 0;
+    void init(const char* ip, uint16_t port, uint64_t expiration, uint64_t timeout) {
+        ep_ = photon::net::EndPoint::parse(ip, port);
+        expiration_ = expiration;
+        timeout_ = timeout;
     }
 
-    int readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx) {
+    void init_device(const char* trid, uint32_t nsid, uint64_t num_blocks, uint32_t* block_size) {
+        SPDK_DEBUGLOG(bdev_photon, "init_device begin\n");
+        sem_t* sem = new sem_t;
+        sem_init(sem, 0, 0);
+        wp_->async_call(new auto([=]{
+            this->create_stub_pool_ifneed();
+            auto stub = stub_pool_->get_stub(ep_, false);
+            assert(stub != nullptr);
+            rpc_client_.do_rpc_init_device(stub, trid, nsid, num_blocks, block_size);
+            stub_pool_->put_stub(ep_, false);
+            sem_post(sem);
+        }));
+        sem_wait(sem);
+        delete sem;
+        SPDK_DEBUGLOG(bdev_photon, "init_device done, block_size=%u\n", *block_size);
+    }
+
+    void readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx) {
         SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d, task_ctx=%p\n", iovcnt, offset_blocks, num_blocks, is_write, task_ctx);
-
-        auto func = [](struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx){
-            SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, get into wp call, before assert check\n");
-            assert(rpc_client_ != NULL);
-            SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, get into wp call, after assert check\n");
-            int rc = 0;
-            if (is_write) {
-                rc = rpc_client_->do_rpc_writev_blocks(iov, iovcnt, offset_blocks, num_blocks);
-            }
-            else {
-                rc = rpc_client_->do_rpc_readv_blocks(iov, iovcnt, offset_blocks, num_blocks);
-            }
-            SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, rpc done\n");
-            if (rc >= 0) {
-                SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, rpc success, task_ctx=%p\n", task_ctx);
-                task_ctx->status = SPDK_BDEV_IO_STATUS_SUCCESS;
-            }
-            else {
-                SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, rpc failed, task_ctx=%p\n", task_ctx);
-                task_ctx->status = SPDK_BDEV_IO_STATUS_FAILED;
-            }
+        wp_->async_call(new auto([=]{
+            this->create_stub_pool_ifneed();
+            auto stub = stub_pool_->get_stub(ep_, false);
+            assert(stub != nullptr);
+            int rc = rpc_client_.do_rpc_readv_writev_blocks(stub, iov, iovcnt, offset_blocks, num_blocks, is_write);
+            stub_pool_->put_stub(ep_, false);
+            if (rc >= 0) task_ctx->status = SPDK_BDEV_IO_STATUS_SUCCESS;
+            else task_ctx->status = SPDK_BDEV_IO_STATUS_FAILED;
             spdk_thread_send_msg(task_ctx->thread, msg_fn, task_ctx);
-            SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, spdk_thread_send_msg done\n");
-        };
-
-        wp_->async_call(new auto(std::bind(func, iov, iovcnt, offset_blocks, num_blocks, is_write, task_ctx)));
-
-        return 0;
+        }));
+        SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks done, status=%d\n", task_ctx->status);
     }
 
 private:
-    static thread_local std::unique_ptr<RPCClient> rpc_client_;
-    std::unique_ptr<photon::WorkPool> wp_;
+    static RPCClient rpc_client_;
+
+    photon::net::EndPoint ep_;
+    uint64_t expiration_;
+    uint64_t timeout_;
+
     std::vector<std::thread> ths_;
+    std::unique_ptr<photon::WorkPool> wp_;
+
+    static thread_local std::unique_ptr<photon::rpc::StubPool> stub_pool_;
+    static thread_local Delegate<void> finish_hook_;
+
+    void create_stub_pool_ifneed() {
+        if (stub_pool_ == nullptr) {
+            stub_pool_.reset(photon::rpc::new_stub_pool(expiration_, timeout_));
+            finish_hook_.bind(this, &Client::destroy_stub_pool);
+            photon::fini_hook(finish_hook_);
+        }
+    }
+
+    void destroy_stub_pool() {
+        if (stub_pool_ != nullptr) {
+            stub_pool_.reset();
+        }
+    }
 };
-thread_local std::unique_ptr<RPCClient> Client::rpc_client_;
+RPCClient Client::rpc_client_;
+thread_local std::unique_ptr<photon::rpc::StubPool> Client::stub_pool_;
+thread_local Delegate<void> Client::finish_hook_;
 
 static int bdev_photon_count = 0;
 
@@ -294,9 +213,7 @@ SPDK_BDEV_MODULE_REGISTER(photon, &photon_if)
 
 static int module_io_channel_create_cb(void *io_device, void *ctx_buf) {
     SPDK_DEBUGLOG(bdev_photon, "module_io_channel_create_cb\n");
-
     struct module_io_channel_context* module_ioch_ctx = (struct module_io_channel_context*)ctx_buf;
-
     return 0;
 }
 
@@ -432,7 +349,7 @@ static void* create_rpc_client(void* arg) {
     return nullptr;
 }
 
-extern "C" int bdev_photon_create(struct spdk_bdev **bdev, const char* trid, uint32_t nsid, uint64_t num_blocks) {
+extern "C" int bdev_photon_create(struct spdk_bdev **bdev, const char* trid, uint32_t nsid, uint64_t num_blocks, const char* ip, uint16_t port, uint64_t expiration, uint64_t timeout) {
     SPDK_DEBUGLOG(bdev_photon, "bdev_photon_create\n");
 
     struct photon_bdev* pt_bdev = (struct photon_bdev* )calloc(1, sizeof(struct photon_bdev));
@@ -445,6 +362,7 @@ extern "C" int bdev_photon_create(struct spdk_bdev **bdev, const char* trid, uin
     assert(pt_bdev->client != NULL);
 
     uint32_t block_size = 0;
+    pt_bdev->client->init(ip, port, expiration, timeout);
     pt_bdev->client->init_device(trid, nsid, num_blocks, &block_size);
     if (block_size == 0) {
         SPDK_ERRLOG("bdev_photon_create: init_device failed\n");

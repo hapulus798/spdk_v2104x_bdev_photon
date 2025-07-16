@@ -254,8 +254,8 @@ def bdev_malloc_delete(client, name):
     return client.call('bdev_malloc_delete', params)
 
 @deprecated_alias('construct_photon_bdev')
-def bdev_photon_create(client, trid, nsid, num_blocks):
-    params = {'num_blocks': num_blocks, 'nsid': nsid, 'trid': trid}
+def bdev_photon_create(client, trid, nsid, num_blocks, ip, port, expiration, timeout):
+    params = {'num_blocks': num_blocks, 'nsid': nsid, 'trid': trid, 'ip': ip, 'port': port, 'expiration': expiration, 'timeout': timeout}
     return client.call('bdev_photon_create', params)
 
 @deprecated_alias('delete_photon_bdev')
