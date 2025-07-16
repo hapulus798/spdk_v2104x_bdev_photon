@@ -10,7 +10,9 @@
             "nsid": 1,
             "num_blocks": 1024,
             "ip": "127.0.0.1",
-            "port": 43548
+            "port": 43548,
+            "expiration": 10000000,
+            "timeout": 1000000
           }
         }
       ]
