@@ -7,8 +7,7 @@
 #include <photon/photon.h>
 #include <photon/net/socket.h>
 #include <photon/rpc/rpc.h>
-#include <photon/thread/thread11.h>
-#include <photon/thread/workerpool.h>
+#include <photon/common/executor/executor.h>
 
 #include <sys/epoll.h>
 #include <unistd.h>
@@ -33,6 +32,16 @@ public:
         if (rc < 0) return rc;
 
         *block_size = resp.sector_size;
+        return resp.rc;
+    }
+
+    int do_rpc_fini_device(photon::rpc::Stub* stub) {
+        FiniDevice::Request req;
+        req.foo = 0;
+        FiniDevice::Response resp;
+        resp.rc = -1;
+        int rc = stub->call<FiniDevice>(req, resp);
+        if (rc < 0) return rc;
         return resp.rc;
     }
 
@@ -82,32 +91,13 @@ static void msg_fn(void* arg) {
 
 class Client {
 public:
-    Client() : wp_(new photon::WorkPool(0))
-    {
-        SPDK_DEBUGLOG(bdev_photon, "Client construct begin\n");
-        sem_t sem;
-        sem_init(&sem, 0, 0);
-        for (int i=0; i<1; i++) {
-            ths_.emplace_back([](sem_t* sem, photon::WorkPool* wp){
-                photon::init();
-                sem_post(sem);
-                wp->join_current_vcpu_into_workpool();
-                photon::fini();
-            }, &sem, wp_.get());
-        }
-        for (int i=0; i<1; i++) {
-            sem_wait(&sem);
-        }
-        SPDK_DEBUGLOG(bdev_photon, "Client construct done\n");
-    }
+    Client() : executor_(new photon::Executor()) {}
 
     ~Client() {
         SPDK_DEBUGLOG(bdev_photon, "Client destruct begin\n");
         stub_pool_.reset();
         SPDK_DEBUGLOG(bdev_photon, "Client destruct after delete stub_pool\n");
-        wp_.reset();
-        SPDK_DEBUGLOG(bdev_photon, "Client destruct after wp reset\n");
-        for (auto& th: ths_) th.join();
+        executor_.reset();
         SPDK_DEBUGLOG(bdev_photon, "Client destruct done\n");
     }
 
@@ -119,24 +109,31 @@ public:
 
     void init_device(const char* trid, uint32_t nsid, uint64_t num_blocks, uint32_t* block_size) {
         SPDK_DEBUGLOG(bdev_photon, "init_device begin\n");
-        sem_t* sem = new sem_t;
-        sem_init(sem, 0, 0);
-        wp_->async_call(new auto([=]{
+        executor_->perform([=]{
             this->create_stub_pool_ifneed();
             auto stub = stub_pool_->get_stub(ep_, false);
             assert(stub != nullptr);
             rpc_client_.do_rpc_init_device(stub, trid, nsid, num_blocks, block_size);
             stub_pool_->put_stub(ep_, false);
-            sem_post(sem);
-        }));
-        sem_wait(sem);
-        delete sem;
+        });
         SPDK_DEBUGLOG(bdev_photon, "init_device done, block_size=%u\n", *block_size);
+    }
+
+    void fini_device() {
+        SPDK_DEBUGLOG(bdev_photon, "fini_device begin\n");
+        executor_->perform([=]{
+            this->create_stub_pool_ifneed();
+            auto stub = stub_pool_->get_stub(ep_, false);
+            assert(stub != nullptr);
+            rpc_client_.do_rpc_fini_device(stub);
+            stub_pool_->put_stub(ep_, false);
+        });
+        SPDK_DEBUGLOG(bdev_photon, "fini_device end\n");
     }
 
     void readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx) {
         SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d, task_ctx=%p\n", iovcnt, offset_blocks, num_blocks, is_write, task_ctx);
-        wp_->async_call(new auto([=]{
+        executor_->async_perform(new auto([=]{
             this->create_stub_pool_ifneed();
             auto stub = stub_pool_->get_stub(ep_, false);
             assert(stub != nullptr);
@@ -157,16 +154,16 @@ private:
     uint64_t timeout_;
 
     std::vector<std::thread> ths_;
-    std::unique_ptr<photon::WorkPool> wp_;
+    std::unique_ptr<photon::Executor> executor_;
 
     static thread_local std::unique_ptr<photon::rpc::StubPool> stub_pool_;
-    static thread_local Delegate<void> finish_hook_;
 
     void create_stub_pool_ifneed() {
         if (stub_pool_ == nullptr) {
             stub_pool_.reset(photon::rpc::new_stub_pool(expiration_, timeout_));
-            finish_hook_.bind(this, &Client::destroy_stub_pool);
-            photon::fini_hook(finish_hook_);
+            Delegate<void> finish_hook;
+            finish_hook.bind(this, &Client::destroy_stub_pool);
+            photon::fini_hook(finish_hook);
         }
     }
 
@@ -178,7 +175,6 @@ private:
 };
 RPCClient Client::rpc_client_;
 thread_local std::unique_ptr<photon::rpc::StubPool> Client::stub_pool_;
-thread_local Delegate<void> Client::finish_hook_;
 
 static int bdev_photon_count = 0;
 
@@ -241,9 +237,10 @@ static int bdev_photon_destruct(void *ctx) {
     SPDK_DEBUGLOG(bdev_photon, "bdev_photon_destruct\n");
 
     struct photon_bdev *pt_bdev = (struct photon_bdev*)ctx;
-
     assert(pt_bdev != NULL);
+
     assert(pt_bdev->client != NULL);
+    pt_bdev->client->fini_device();
     delete pt_bdev->client;
 
     spdk_io_device_unregister(pt_bdev, NULL);
