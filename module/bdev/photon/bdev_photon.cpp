@@ -45,12 +45,11 @@ public:
         return resp.rc;
     }
 
-    int do_rpc_readv_writev_blocks(photon::rpc::Stub* stub, struct iovec* iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write) {
-        SPDK_DEBUGLOG(bdev_photon, "do_rpc_readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d\n", iovcnt, offset_blocks, num_blocks, is_write);
+    int do_rpc_readv_writev_blocks(photon::rpc::Stub* stub, struct iovec* iov, int iovcnt, uint64_t offset, uint64_t length, bool is_write) {
+        SPDK_DEBUGLOG(bdev_photon, "do_rpc_readv_writev_blocks, iovcnt=%d, offset=%lu, length=%lu, is_write=%d\n", iovcnt, offset, length, is_write);
         if (is_write) {
             WritevBlocks::Request req;
-            req.offset_blocks = offset_blocks;
-            req.num_blocks = num_blocks;
+            req.offset = offset;
             req.buf.assign(iov, iovcnt);
 
             WritevBlocks::Response resp;
@@ -62,8 +61,8 @@ public:
         }
         else {
             ReadvBlocks::Request req;
-            req.offset_blocks = offset_blocks;
-            req.num_blocks = num_blocks;
+            req.offset = offset;
+            req.length = length;
 
             ReadvBlocks::Response resp;
             resp.rc = -1;
@@ -123,13 +122,13 @@ public:
         SPDK_DEBUGLOG(bdev_photon, "fini_device end\n");
     }
 
-    void readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset_blocks, uint64_t num_blocks, bool is_write, struct photon_task_context* task_ctx) {
-        SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, iovcnt=%d, offset_blocks=%lu, num_blocks=%lu, is_write=%d, task_ctx=%p\n", iovcnt, offset_blocks, num_blocks, is_write, task_ctx);
+    void readv_writev_blocks(struct iovec *iov, int iovcnt, uint64_t offset, uint64_t length, bool is_write, struct photon_task_context* task_ctx) {
+        SPDK_DEBUGLOG(bdev_photon, "readv_writev_blocks, iovcnt=%d, offset=%lu, length=%lu, is_write=%d, task_ctx=%p\n", iovcnt, offset, length, is_write, task_ctx);
         executor_->async_perform(new auto([=]{
             auto pool = get_stub_pool();
             auto stub = pool->get_stub(ep_, false);
             assert(stub != nullptr);
-            int rc = rpc_client_.do_rpc_readv_writev_blocks(stub, iov, iovcnt, offset_blocks, num_blocks, is_write);
+            int rc = rpc_client_.do_rpc_readv_writev_blocks(stub, iov, iovcnt, offset, length, is_write);
             pool->put_stub(ep_, false);
             if (rc >= 0) task_ctx->status = SPDK_BDEV_IO_STATUS_SUCCESS;
             else task_ctx->status = SPDK_BDEV_IO_STATUS_FAILED;
@@ -240,7 +239,7 @@ static void bdev_photon_rwv(struct photon_bdev* pt_bdev, struct photon_task_cont
     assert(disk_ioch_ctx->module_ioch_ctx != NULL);
     assert(pt_bdev != NULL);
     assert(pt_bdev->device != NULL);
-    pt_bdev->device->readv_writev_blocks(iov, iovcnt, offset_blocks, num_blocks, is_write, task_ctx);
+    pt_bdev->device->readv_writev_blocks(iov, iovcnt, offset_blocks * pt_bdev->bdev.blocklen, num_blocks * pt_bdev->bdev.blocklen, is_write, task_ctx);
 }
 
 static void bdev_photon_submit_request(struct spdk_io_channel *ch, struct spdk_bdev_io *bdev_io) {
