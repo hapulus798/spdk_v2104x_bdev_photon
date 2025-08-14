@@ -48,7 +48,8 @@
 #include "optgroup.h"
 
 #ifdef for_each_rw_ddir
-#define FIO_HAS_ZBD (FIO_IOOPS_VERSION >= 26)
+// #define FIO_HAS_ZBD (FIO_IOOPS_VERSION >= 26)
+#define FIO_HAS_ZBD (0)
 #else
 #define FIO_HAS_ZBD (0)
 #endif

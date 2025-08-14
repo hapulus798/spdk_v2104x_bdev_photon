@@ -6,9 +6,10 @@ direct=1
 verify=0
 time_based=1
 ramp_time=0
-runtime=2
-iodepth=128
-rw=randrw
+runtime=10
+size=50g
+rw=randread
 
 [test]
 numjobs=1
+filename=trtype=pcie traddr=0000.86.00.0 ns=1

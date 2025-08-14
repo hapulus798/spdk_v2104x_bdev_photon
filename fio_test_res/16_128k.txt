@@ -1,0 +1,29 @@
+test: (g=0): rw=randread, bs=(R) 128KiB-128KiB, (W) 128KiB-128KiB, (T) 128KiB-128KiB, ioengine=spdk, iodepth=16
+fio-3.40-34-g306d8
+Starting 1 thread
+EAL: No legacy callbacks, legacy socket not created
+
+test: (groupid=0, jobs=1): err= 0: pid=124698: Thu Aug  7 10:52:01 2025
+  read: IOPS=15.0k, BW=1880MiB/s (1972MB/s)(18.4GiB/10001msec)
+    slat (nsec): min=429, max=5793, avg=491.03, stdev=95.64
+    clat (usec): min=198, max=9892, avg=1062.43, stdev=484.33
+     lat (usec): min=198, max=9892, avg=1062.92, stdev=484.33
+    clat percentiles (usec):
+     |  1.00th=[  330],  5.00th=[  429], 10.00th=[  510], 20.00th=[  635],
+     | 30.00th=[  750], 40.00th=[  865], 50.00th=[  988], 60.00th=[ 1106],
+     | 70.00th=[ 1270], 80.00th=[ 1450], 90.00th=[ 1713], 95.00th=[ 1942],
+     | 99.00th=[ 2442], 99.50th=[ 2671], 99.90th=[ 3326], 99.95th=[ 3556],
+     | 99.99th=[ 5342]
+   bw (  MiB/s): min= 1849, max= 1897, per=100.00%, avg=1880.60, stdev=13.42, samples=20
+   iops        : min=14796, max=15178, avg=15044.80, stdev=107.35, samples=20
+  lat (usec)   : 250=0.05%, 500=9.30%, 750=20.49%, 1000=21.49%
+  lat (msec)   : 2=44.52%, 4=4.13%, 10=0.01%
+  cpu          : usr=99.97%, sys=0.02%, ctx=8, majf=0, minf=0
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=100.0%, 32=0.0%, >=64=0.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.1%, 32=0.0%, 64=0.0%, >=64=0.0%
+     issued rwts: total=150448,0,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=16
+
+Run status group 0 (all jobs):
+   READ: bw=1880MiB/s (1972MB/s), 1880MiB/s-1880MiB/s (1972MB/s-1972MB/s), io=18.4GiB (19.7GB), run=10001-10001msec
