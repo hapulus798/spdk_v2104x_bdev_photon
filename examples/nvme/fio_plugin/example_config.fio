@@ -7,7 +7,7 @@ verify=0
 time_based=1
 ramp_time=0
 runtime=10
-size=50g
+size=1g
 rw=randread
 
 [test]

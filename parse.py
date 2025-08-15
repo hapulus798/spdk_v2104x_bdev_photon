@@ -2,7 +2,7 @@ import os
 import re
 
 
-rootdir = "./fio_test_res"
+rootdir = "./fio_test_res2_write"
 fnames = os.listdir(rootdir)
 for fname in fnames:
     iodepth = fname.split(".")[0].split("_")[0]

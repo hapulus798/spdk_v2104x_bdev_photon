@@ -1,17 +1,16 @@
 [global]
 ioengine=spdk_bdev
-spdk_json_conf=./examples/bdev/fio_plugin/bdev.json
+spdk_json_conf=/home/hongjingxuan.hjx/spdk/spdk_v21.04.x_test/examples/bdev/fio_plugin/bdev.json
 thread=1
 group_reporting=1
 direct=1
 verify=0
 time_based=1
 ramp_time=0
-runtime=2
-iodepth=128
-rw=randrw
-bs=4k
+runtime=10
+size=1g
+rw=randread
 
 [test]
-filename=Malloc0
+filename=Nvme0n1
 numjobs=1
